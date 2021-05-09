@@ -1,1 +1,642 @@
+---
+title: "Box Office Revenue Prediction Project"
+author: "Tillman Degens"
+date: "5/8/2021"
+output: github_document
+---
 
+This project attempts to build a model that predicts a films box office revenue, using data on movies from The Movie Database (TMDB). To do this it uses a linear regression, lasso regression, ridge regression, elastic net regression, and random forest regression. The project finds that most successful models are linear regression and random forest regression. The results could be useful to movie studios or film enthusiasts.
+
+One of the hardest hit industries by the Covid-19 pandemic, Hollywood is looking for its place in the modern economy. Several studios have already decided to move their film slates entirely digital, with hundreds of other films currently in limbo. For this reason, it is increasingly important for studios to project what movies will succeed at the box office and what movies are better off released to streaming service. In addition to studio interest, box office revenues have proven to be of interest to the public. Each week the Wall Street Journal includes a segment on the box office results, and there are even “Fantasy Movie Leagues” like fantasy sports. This project would be of interest to each of these demographics, as it takes publicly available data on movie characteristics and aims to create a model that accurately predicts box office revenues.
+
+This project used three datasets: tmdb-box-office-projections, ratings, and GDP deflator. The primary data was from the TMDB box office prediction challenge in Kaggle. This data was scraped from TMDB (The Movie Database) using an open API. The data frame was then joined with the ratings dataset, which came from the same database, to include average IMDB rating for each film. Lastly, the data was joined by year with the GDP deflator obtained from the Saint Louis Federal Reserve. This was used to adjust the revenue and budget values to 2012 dollars. The first step in developing a usable predictive model was cleaning the data to manufacture new variables. For example, the “Cast” variable in the initial data frame was a string of all actors who had worked on the film in a JSON format. The separate() function was used to isolate the gender of the main character, which was then used a predictor. A similar approach was taken for the variable genre, where the two main genres for each film were isolated. Next a binary variable was created for if either the first or second genre fell into a specific category (action, comedy, etc.). The release date variable was broken into year (a continuous numerical value) and month (a categorical value). Lastly, to prepare the data for analysis, both monetary variables, budget and revenue were divided by the GDP deflator in the year they were released.
+
+The data proved difficult to process. The original dataset contained 3000 films, but the final clean dataset had only 1,454 observations. This was primarily because there were 1335 films removed which were missing an average IMDB rating. In addition, the data contained predominantly films grossing less that 50 million dollars. This meant that the model performed significantly better when the outliers, the highest grossing films were removed. However, I elected to keep the highest grossing films in the model as they are the most important to movie studios.
+
+Four learning methods were applied to the data: lasso regression, ridge regression, elastic net regression, and random forest regression. These were compared against the control model which was a linear regression containing all predictors. The parameters for lasso and ridge regression were tuned using 10-fold cross validation, with the best model representing the lowest RMSE. The λ values were 2310129 and 0 (practically), respectively. For the elastic net model, alpha, a mixture of ridge and lasso regression was added. The λ value was 1.4e10 and the mixture was 0.2. The random forests regression was tuned using bootstrap cross validation with the best model representing the lowest RMSE as well. It was tuned for the number of variables randomly sampled, which was 8 and the minimum datapoints required for a node to be split, which was 2.
+
+The results indicate that the optimal penalty (λ) would have been zero as the linear model outperformed the lasso, ridge, and elastic net regressions with an RMSE of 99 million. The model’s success was measured as the RMSE when evaluated on the test data. The underperformance of the tuned linear models indicates that I included too many options for λ and overfit the training data. It also indicates that it is difficult to accurately predict revenue given the dataset. The best performing model was the random forest regression which had an RMSE of 92 million. The accuracy of the model could have been greatly improved had the outliers been removed, but this would have further decreased the usefulness of the results. Ultimately given the publicly available data it is very difficult to accurately predict box office revenues.
+
+## Loading in Data
+
+
+The two datasets used were tmdb-box-office-projections and ratings. The tmdb data was from the box office prediction challenge in kaggle, while the ratings and runtime were scraped in through the same API (not included in the competition data). I added them to increase the the accurercy of the model. I elected not to use the much larger ratings dataset because I assume that the Kaggle competition contains more accurate data.
+
+```{r,message=FALSE,warning=FALSE}
+#Load packages and data
+library(pacman)
+
+p_load(tidyverse, modeldata, skimr, janitor, kknn, tidymodels, magrittr, glmnet,ggplot2, lubridate, priceR, dplyr, naniar, vip)
+
+setwd("C:/Users/tillm/OneDrive/Desktop/Github")
+revenue_data = "train.csv" %>% read_csv()
+ratings = "Ratings.csv" %>% read_csv()
+```
+
+## Quick Overview
+
+```{r,message=FALSE,warning=FALSE}
+glimpse(revenue_data)
+glimpse(ratings)
+```
+
+## Joining the Datasets
+
+Only need runtime, and rating from the rating df. Originally tried by joinging on original_title. Read through the documentation to figure out the issue. What happened was the data was joined by title but some movies are remakes and others just have the same title. For example both Ralph Machio and Jaden smith starred in "The Karate Kid".Read through the documentation to figure out the issue. Have to join by id (somehow missed it on first look through).
+
+Because there are so many more variables in the ratings dataset it will be interesting to see whether more data or more predictors will have a larger impact on the accuracy of the model.
+
+
+## Joining Data for Vote_Average and Vote_Count Variable
+
+```{r,message=FALSE,warning=FALSE}
+ratings = ratings %>%
+select(vote_average, id)
+movies = revenue_data %>% 
+left_join(ratings, by = "id")
+
+sum(is.na(movies$vote_average))
+#Have to remove all NA for vote average, 1335 is too many to immpuatate.
+
+movies = movies %>%
+filter(!is.na(vote_average))
+```
+
+The number of observations is now down to 1665
+
+## Filter Out Unreleased Films
+Because it is of no use to predict revenues for unreleased films those will also need to be filtered out.
+
+```{r,message=FALSE,warning=FALSE}
+movies = movies %>% filter(status == "Released")
+#This removes one film
+```
+
+## Manipulate Data to Create New Variables
+
+
+Because there is a lack of predictor variables and many are unusable, for example cast where an observation looks like this: 'cast_id': 4, 'character': 'Lou', 'credit_id': '52fe4ee7c3a36847f82afae7', 'gender': 2, 'id': 52997, 'name': 'Rob Corddry', 'order': 0, 'profile_path': '/k2zJL0V1nEZuFT08xUdOd3ucfXz.jpg'}, {'cast_id': 5, 'character': 'Nick', 'credit_id': '52fe4ee7c3a36847f82afaeb', 'gender': 2, 'id': 64342, 'name': 'Craig Robinson', 'order': 1, 'profile_path': '/tVaRMkJXOEVhYxtnnFuhqW0Rjzz.jpg'}, {'cast_id': 6, 'character': 'Jacob', 'credit_id': '52fe4ee7c3a36847f82afaef', 'gender': 2, 'id': 54729, 'name': 'Clark Duke', 'order': 2, 'profile_path': '/oNzK0umwm5Wn0wyEbOy6TVJCSBn.jpg'}, {'cast_id': 7, 'character': 'Adam Jr.', 'credit_id': '52fe4ee7c3a36847f82afaf3', 'gender': 2, 'id': 36801, 'name': 'Adam Scott', 'order': 3, 'profile_path': '/5gb65xz8bzd42yjMAl4zwo4cvKw.jpg'}, {'cast_id': 8, 'character': 'Hot Tub Repairman', 'credit_id': '52fe4ee7c3a36847f82afaf7', 'gender': 2, 'id': 54812, 'name': 'Chevy Chase', 'order': 4, 'profile_path': '/svjpyYtPwtjvRxX9IZnOmOkhDOt.jpg'}, {'cast_id': 9, 'character': 'Jill', 'credit_id': '52fe4ee7c3a36847f82afafb', 'gender': 1, 'id': 94098, 'name': 'Gillian Jacobs', 'order': 5, 'profile_path': '/rBnhe5vhNPnhRUdtYahBWx90fJM.jpg'}, {'cast_id': 10, 'character': 'Sophie', 'credit_id': '52fe4ee7c3a36847f82afaff', 'gender': 1, 'id': , 'name': 'Bianca Haase', 'order': 6, 'profile_path':)
+
+we need to manipulate some of the variables into something usable.
+
+New variables created are:
+
+Gender of main character (actor). Dummy variable for whether the main character is a male or female. This is NA if the characters gender is undefined, for example in the case of a tree in an animated film.
+
+Month released. Movie studios are continuously competing over when they release a movie. Late spring and early summer is typically reserved for blockbusters, as well as December/January because kids are out of school. Movie studios typically release their best movies in October/November as "Oscar bait" so they are fresh on audiences/judges minds during the academy awards. There are numerous other seasonal trends in the movie release schedule.
+
+Language: I am changing this from the language to an English/foreign binary variable due to the tiny sample size for many languages.
+
+Genre: First must separate genres out into dummy variables. Also create a new variable for more than 2 genres.
+
+```{r,message=FALSE,warning=FALSE}
+#Get gender of main character
+movies= separate(movies, cast, c("drop", "gender"), sep = "'gender':") #Text to columns
+
+#head(movies$gender)
+
+#seperate again to isolate gender
+movies = separate(movies, gender, c("gender","drop"), sep = ",")
+
+#Change gender to numeric
+movies = movies %>%
+mutate(gender = as.numeric(gender))
+
+#Filter out non gender characters or missing for the simplicity of the model
+movies= movies%>% filter(gender == 1 | gender == 2)
+#Reduces dataset to 1527 rows
+
+#Switch gender to male/female
+movies = movies %>% mutate(gender = case_when( gender == 1 ~ "female", gender == 2 ~ "male" ))
+
+gender = movies %>%
+mutate(gender = as.factor(gender))%>% ggplot(aes(gender, revenue))+geom_boxplot() #Look at relationship between gender and revenue
+gender
+
+gender = movies %>%
+mutate(gender = as.factor(gender))%>% ggplot(aes(gender, budget))+geom_boxplot() #Look at relationship between gender and budget
+gender
+```
+
+Appears to be a slight relationship between casting a male lead and box office revenues. This is most likely due to studio bias in casting males in blockbuster movies.(This is the same relationship as budget).
+
+
+## Genre
+
+```{r,message=FALSE,warning=FALSE}
+#Change genres
+movies= separate(movies, genres, c("drop1", "genre1", "genre2", "genre3"), sep = "'name': '")
+movies= separate(movies, genre1, c("genre1"), sep = "'}")
+movies= separate(movies, genre2, c("genre2"), sep = "'}")
+
+#Create variable for more than 2 genres
+movies = movies %>%
+mutate(morethantwogenre = if_else(!is.na(genre3), 1, 0))
+
+#Check the genre types
+unique(movies$genre1)
+unique(movies$genre2)
+
+#See if they match
+n_distinct(movies$genre1)
+n_distinct(movies$genre2)
+
+#Count number of each value
+movies %>% count(genre1)
+movies %>% count(genre2)
+
+#Create Dummy Vars
+movies = movies %>% mutate(genre1 = if_else(is.na(genre1), "0", genre1))
+movies = movies %>% mutate(genre2 = if_else(is.na(genre2), "0", genre2))
+
+#Create Binary Variables for all genres with more than 40 observations.
+movies1 = movies %>% mutate(Comedy = if_else(genre1 == "Comedy" | genre2 == "Comedy", 1, 0))%>%
+mutate(Drama = if_else(genre1 == "Drama" | genre2 == "Drama", 1, 0))%>%
+mutate(Thriller = if_else(genre1 == "Thriller" | genre2 == "Thriller", 1, 0))%>%
+mutate(Action = if_else(genre1 == "Action" | genre2 == "Action", 1, 0))%>%
+mutate(Animation = if_else(genre1 == "Animation" | genre2 == "Animation", 1, 0))%>%
+mutate(Horror = if_else(genre1 == "Horror" | genre2 == "Horror", 1, 0))%>%
+mutate(Documentary = if_else(genre1 == "Documentary" | genre2 == "Documentary", 1, 0))%>%
+mutate(Adventure = if_else(genre1 == "Adventure" | genre2 == "Adventure", 1, 0))%>%
+mutate(Crime = if_else(genre1 == "Crime" | genre2 == "Crime", 1, 0))%>%
+mutate(Mystery = if_else(genre1 == "Mystery" | genre2 == "Mystery", 1, 0))%>%
+mutate(Fantasy = if_else(genre1 == "Fantasy" | genre2 == "Fantasy", 1, 0))%>%
+mutate(Science_Fiction = if_else(genre1 == "Science Fiction" | genre2 == "Science Fiction", 1, 0))%>%
+mutate(Romance = if_else(genre1 == "Romance" | genre2 == "Romance", 1, 0))%>%
+mutate(Music = if_else(genre1 == "Music" | genre2 == "Music", 1, 0))%>%
+mutate(Family = if_else(genre1 == "Family" | genre2 == "Family", 1, 0))%>%
+mutate(History = if_else(genre1 == "History" | genre2 == "History", 1, 0))
+
+```
+
+## Turn Date Released into Month and Year
+
+```{r,message=FALSE,warning=FALSE}
+#Change date into year and month released
+movies2 = movies1 %>% mutate(release_date = as.Date(release_date, "%m/%d/%y"))%>% mutate(month = strftime(release_date, "%m"))%>%
+mutate(year = strftime(release_date, "%Y"))
+
+#change year into a coninuous variable
+movies2 = movies2 %>% mutate(year= as.numeric(year))
+
+```
+
+## Change Language to English/Foreign Binary Variable
+
+```{r,message=FALSE,warning=FALSE}
+movies2 = movies2 %>% mutate(original_language = if_else(original_language == "en", 1, 0))
+```
+
+## Adjust Revenue and Budget for Inflation
+
+```{r,message=FALSE,warning=FALSE}
+setwd("C:/Users/tillm/OneDrive/Desktop/Github")
+#Read in CSV to adjust to 2012 dollars taken from St. Louis Fed
+gdp = "GDP.csv" %>% read_csv
+
+glimpse(gdp)
+
+#Change date into year and month released
+gdp = gdp %>% mutate(DATE = as.Date(DATE, "%m/%d/%y"))%>% 
+mutate(year = strftime(DATE, "%Y"))
+
+#change year into a coninuous variable
+gdp = gdp %>% mutate(year= as.numeric(year))
+
+#Join by year
+movies2 = movies2 %>% 
+left_join(gdp, by = "year")
+
+movies2 = movies2 %>% mutate(gdp = GDPDEF/100) #Turn into percentage
+
+movies2 = movies2 %>% mutate(revenue1 = revenue/gdp) %>% mutate(budget = budget/gdp)#Turn revenue and budget figures into 2012 dollars
+
+movies2 = movies2 %>% filter(!is.na(GDPDEF))
+
+skim(movies2)
+```
+
+
+Quick Exploratory Analysis
+
+```{r,message=FALSE,warning=FALSE}
+#Just some fun exploratory analysis
+movies2 %>%
+    select(budget, genre1, month, revenue1, year, gender, vote_average, original_title)%>%
+    arrange(desc(vote_average)) %>%
+    slice(1:20)
+movies2 %>%
+    select(budget, genre1, month, revenue1, year, gender, vote_average, original_title)%>%
+    arrange(desc(revenue1)) %>%
+    slice(1:20)
+
+movierate = movies2 %>% ggplot(aes(vote_average, revenue1))+ geom_point()
+movierate
+
+moviemonth = movies2 %>% ggplot(aes(month, revenue1))+ geom_boxplot()
+moviemonth
+```
+
+From the above analysis it appears that the highest grossing movies all belong to a established franchise and therefore could be best predicted by the popularity of the franchise. Because these films will skew the RMSE to improve the model they can be removed (shown below). However, I elected not to do so as I believe that the highest grossing movies would also be of the highest interest to someone predicting revenues.
+
+```{r,message=FALSE,warning=FALSE}
+#outliers <- boxplot(movies2$revenue, plot=FALSE)$out
+#movies2[which(movies2$revenue %in% outliers),]
+
+#movies2 = movies2[-which(movies2$revenue %in% outliers),]
+
+#glimpse(movies2)
+
+
+#Set budget to NA if budget = 0
+is.na(movies2$budget) <- movies2$budget <= .01
+is.na(movies2$popularity) <- movies2$popularity <= .01
+is.na(movies2$runtime) <- movies2$runtime <= .01
+```
+
+## All variables are created and we are ready to start prediction!
+
+First model is a linear regression model that will act as a baseline comparison for more complex models.
+
+
+## Split Data Into Train/Test and Create Recipe
+
+```{r,message=FALSE,warning=FALSE}
+#Split data into train and test
+set.seed(100)
+movie_split = movies2 %>% initial_split(prop = 0.8) #20% in test
+movie_train = movie_split %>% training()
+movie_test = movie_split %>% testing()
+
+
+#Create recipe
+movie_rec = recipe(revenue1 ~ original_title  + gender + month + year + id + budget  + original_language  + popularity +vote_average+ runtime + morethantwogenre
+                  + Comedy + Drama  + Thriller  + Action + Animation  + Horror + Documentary  + Adventure + Crime + Mystery + Fantasy + Science_Fiction +
+                  Romance + Music + Family + History,vote_count , data = movies2) %>% 
+    update_role(id, new_role = "ID") %>%  
+    update_role(original_title, new_role = "ID") %>%
+
+#Normalize all predictors
+
+step_normalize(all_predictors() & all_numeric()) %>% 
+
+#Impute missing values using median
+
+step_medianimpute(budget,popularity, runtime) %>%
+
+#Create dummies
+
+step_dummy(all_predictors() & all_nominal())
+
+#Prep and juice
+
+movie_df = movie_rec %>% prep() %>% juice()
+
+#skim(movie_df)
+```
+
+```{r,message=FALSE,warning=FALSE}
+#Create Workflow Recipe
+wf <- workflow() %>%
+  add_recipe(movie_rec)
+```
+
+## Linear Model
+
+```{r,message=FALSE,warning=FALSE}
+lm_mod <- linear_reg() %>% 
+          set_engine("lm") #specift linear regression
+lm_wf <- wf %>% add_model(lm_mod) #use all predictor variables in lm
+
+lm_fit <- 
+  lm_wf %>% 
+  fit(data = movie_train) #fit model to training data
+```
+
+## Lasso Model
+
+```{r,message=FALSE,warning=FALSE}
+#Divide the training set into 10 folds for cross validation
+movie_cv <-  movie_train %>% vfold_cv(v = 5)
+
+#Specificy thtat this is a lasso by selecting mixture = 1
+tune_spec <- linear_reg(penalty = tune(), mixture = 1) %>%
+  set_engine("glmnet")
+
+#Set lambdas (penalty for lasso)
+lambdas = 10^seq(from = 10, to = -5, length = 100)
+
+#Set seed for reproductability 
+set.seed(9999)
+
+#Create the grid
+lasso_grid = tune_grid(
+  wf %>% add_model(tune_spec),#Add model to workflow from linear reg
+  resamples = movie_cv, #k fold validation
+  grid = data.frame(penalty = lambdas),#call penalities
+    metrics = metric_set(rmse) #looking to minimize rmse
+)
+```
+
+
+## Table of the results for Lasso
+
+```{r,message=FALSE,warning=FALSE}
+lasso_grid %>%
+  collect_metrics()
+```
+## Graphical Results for Lasso
+
+```{r,message=FALSE,warning=FALSE}
+#Create graph of the relationship between rmse and lambda
+lasso_grid %>%
+  collect_metrics() %>% ggplot(aes(penalty, mean, color = .metric)) +
+  geom_errorbar(aes(
+    ymin = mean - std_err,
+    ymax = mean + std_err #Add error bars
+  ),
+  alpha = 0.5
+  ) +
+  geom_line(size = 1.5) +
+  facet_wrap(~.metric, scales = "free", nrow = 2) +
+  scale_x_log10() +
+  theme(legend.position = "none")
+```
+
+```{r,message=FALSE,warning=FALSE}
+#Select best rmse and finalize workflow
+lowest_rmse <- lasso_grid %>%
+  select_best("rmse")
+
+final_lasso <- finalize_workflow(
+  wf %>% add_model(tune_spec),
+  lowest_rmse
+)
+
+final_lasso
+```
+## Graphical Representation of Variable Importance
+
+```{r,message=FALSE,warning=FALSE}
+
+#Use vip package to pull the variable importance for the best model
+final_lasso %>%
+  fit(movie_train) %>%
+  pull_workflow_fit() %>%
+  vi(lambda = lowest_rmse$penalty) %>%
+  mutate(
+    Importance = abs(Importance),
+    Variable = fct_reorder(Variable, Importance)
+  )%>%
+  ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(y = NULL)
+```
+
+## Ridge Model
+
+```{r,message=FALSE,warning=FALSE}
+#Divide the training set into 10 folds for cross validation
+movie_cv <-  movie_train %>% vfold_cv(v = 10)
+
+#Specificy thtat this is a ridge by selecting mixture = 
+tune_ridge <- linear_reg(penalty = tune(), mixture = 0) %>%
+  set_engine("glmnet")
+
+#Set lambdas (penalty for lasso)
+lambdas = 10^seq(from = 5, to = -2, length = 100)
+
+#Set seed for reproductability 
+set.seed(2020)
+
+#Create the grid
+ridge_grid = tune_grid(
+  wf %>% add_model(tune_ridge),#Add model to workflow from linear reg
+  resamples = movie_cv, #k fold validation
+  grid = data.frame(penalty = lambdas),#call penalities
+    metrics = metric_set(rmse) #looking to minimize rmse
+)
+```
+
+```{r,message=FALSE,warning=FALSE}
+ridge_grid %>%
+  collect_metrics()
+```  
+  
+```{r,message=FALSE,warning=FALSE}
+#Select best rmse and finalize workflow
+lowest_rmse <- ridge_grid %>%
+  select_best("rmse")
+
+
+final_ridge <- finalize_workflow(
+  wf %>% add_model(tune_ridge),
+  lowest_rmse
+)
+
+final_ridge
+```
+Best ridge is one with no penalty, this differs from both lasso and elasticnet.
+
+
+## Elasticnet Model
+
+```{r,message=FALSE,warning=FALSE}
+# Our range of λ and α
+lambdas = 10^seq(from = 10, to = -10, length = 100)
+alphas = seq(from = 0, to = 1, by = 0.1)
+# Define the 5-fold split
+#Set seed for reproductability 
+set.seed(12345)
+els_cv = movie_train %>% vfold_cv(v = 10)
+
+#Set seed for reproductability 
+
+
+# Define the elasticnet model
+model_net = linear_reg(
+  penalty = tune(), mixture = tune()
+) %>% set_engine("glmnet")
+
+#Define workflow
+
+
+#Create the grid
+els_grid = tune_grid(
+  wf %>% add_model(model_net),#Add model to workflow from linear reg
+  resamples = els_cv, #k fold validation
+  grid = expand_grid(mixture = alphas, penalty = lambdas),#call penalities, add mixture to combine ridge and lasso
+    metrics = metric_set(rmse) #looking to minimize rmse
+)
+```
+
+```{r,message=FALSE,warning=FALSE}
+#Quick overview of the results
+els_grid %>%
+  collect_metrics()
+```  
+  
+```{r,message=FALSE,warning=FALSE}
+lowest_rmse <- els_grid %>%
+  select_best("rmse")
+
+
+final_els <- finalize_workflow(
+  wf %>% add_model(model_net),
+  lowest_rmse
+)
+
+final_els
+
+```
+Random Forest Model
+
+```{r,message=FALSE,warning=FALSE}
+#Create recipe
+movie_rec = recipe(revenue1 ~ original_title  + gender + month + year + id + budget  + original_language  + popularity + vote_average + runtime  + morethantwogenre
+                  + Comedy + Drama  + Thriller  + Action + Animation  + Horror + Documentary  + Adventure + Crime + Mystery + Fantasy + Science_Fiction +
+                  Romance + Music + Family + History, data = movies2) %>% 
+    update_role(id, new_role = "ID") %>%  
+    update_role(original_title, new_role = "ID") %>%
+
+#Normalize all predictors
+
+step_normalize(all_predictors() & all_numeric()) %>% 
+
+#Impute missing values using median
+
+step_medianimpute(budget,popularity, runtime) %>%
+
+#Create dummies
+
+step_dummy(all_predictors() & all_nominal())
+
+#Prep and juice
+
+movie_df = movie_rec %>% prep() %>% juice()
+
+#skim(movie_df)
+
+#Bootstrap the model for cross validation
+
+movie_boot = bootstraps(movie_train) #Use bootstraps for cv
+
+#Set up specification for rf model
+ranger_spec =
+  rand_forest(mtry = tune(), min_n = tune(), trees = 100) %>% #set trees=100
+  set_mode("regression") %>% #Regression not classification
+  set_engine("ranger") #Use the ranger package
+
+ranger_workflow =
+  wf %>%
+  add_model(ranger_spec) #add rf model to workflow
+
+set.seed(5656)
+ranger_tune <-
+  tune_grid(ranger_workflow,
+    resamples = movie_boot,#Use the bootstrapped sample, this takes a while to run
+    grid = 11 #df size for tuning combinations
+  )
+
+show_best(ranger_tune, metric = "rmse") #show the best models based on rmse
+```
+This suggests that our random forest model performed better than the lasso regression.
+
+```{r,message=FALSE,warning=FALSE}
+final_rf <- ranger_workflow %>% #Finalize workflow to get the best model
+  finalize_workflow(select_best(ranger_tune)) #select best based on lowest rmse
+
+final_rf
+```
+## Graphically analyze the variable importance
+
+```{r,message=FALSE,warning=FALSE}
+imp_spec <- ranger_spec %>%
+  finalize_model(select_best(ranger_tune)) %>% #select the tune with the lowest rmse
+  set_engine("ranger", importance = "permutation") #set engine
+
+workflow() %>% 
+  add_recipe(movie_rec) %>% #add recipe to workflow
+  add_model(imp_spec) %>% #add best model
+  fit(movie_train) %>% #fit to training data
+  pull_workflow_fit() %>% #call variable importance
+  vip(aesthetics = list(alpha = 0.8, fill = "midnightblue"))
+```
+The month released was less important in the random forest model, and the runtime was more important.
+
+
+## Test the Results on the Test Set
+
+
+## Linear Model
+
+```{r,message=FALSE,warning=FALSE}
+results_test <- lm_fit %>% #predict test values using the base linear model
+  predict(new_data = movie_test) %>%
+  mutate(
+    truth = movie_test$revenue,
+    model = "lm"
+  ) 
+
+results_test %>% rmse(truth = truth, estimate = .pred)
+```
+## Lasso
+
+```{r,message=FALSE,warning=FALSE}
+l_fit = last_fit(final_lasso, movie_split) #Trains lasso model one last time on training data and evaluates on testing data
+collect_metrics(l_fit)
+```
+
+```{r,message=FALSE,warning=FALSE}
+collect_predictions(l_fit) %>% #Create a plot with revenue on the x axis and predicted revenue on the y axis
+  ggplot(aes(revenue1, .pred)) +
+  geom_abline(lty = 2, color = "gray50") +
+  geom_point(alpha = 0.5, color = "blue") +
+  coord_fixed()
+```
+
+## Random Forest
+
+```{r,message=FALSE,warning=FALSE}
+rf_fit = last_fit(final_rf, movie_split) #Trains rf model one last time on training data and evaluates on testing data
+collect_metrics(rf_fit)
+```
+
+```{r,message=FALSE,warning=FALSE}
+collect_predictions(rf_fit) %>% #Create a plot with revenue on the x axis and predicted revenue on the y axis
+  ggplot(aes(revenue1, .pred)) +
+  geom_abline(lty = 2, color = "gray50") +
+  geom_point(alpha = 0.5, color = "red") +
+  coord_fixed()
+```
+
+
+## Elasticnet
+
+```{r,message=FALSE,warning=FALSE}
+els_fit = last_fit(final_els, movie_split) #Trains els model one last time on training data and evaluates on testing data
+collect_metrics(els_fit)
+```
+
+```{r,message=FALSE,warning=FALSE}
+collect_predictions(els_fit) %>% #Create a plot with revenue on the x axis and predicted revenue on the y axis
+  ggplot(aes(revenue1, .pred)) +
+  geom_abline(lty = 2, color = "gray50") +
+  geom_point(alpha = 0.5, color = "black") +
+  coord_fixed()
+```
+## Ridge
+
+```{r,message=FALSE,warning=FALSE}
+ridge_fit = last_fit(final_ridge, movie_split) #Trains ridge model one last time on training data and evaluates on testing data
+collect_metrics(ridge_fit)
+```
+
+```{r,message=FALSE,warning=FALSE}
+collect_predictions(ridge_fit) %>% #Create a plot with revenue on the x axis and predicted revenue on the y axis
+  ggplot(aes(revenue1, .pred)) +
+  geom_abline(lty = 2, color = "gray50") +
+  geom_point(alpha = 0.5, color = "purple") +
+  coord_fixed()
+```
